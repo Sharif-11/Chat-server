@@ -66,8 +66,8 @@ const authenticateToken = (req, res, next) => {
 
 // Create Admin
 app.post("/create-admin", async (req, res) => {
-  const { name, password } = req.body;
-  const userId = uuidv4();
+  const { name, password, userId } = req.body;
+
   const hashedPassword = await bcrypt.hash(password, 10);
 
   const newUser = new User({
@@ -85,9 +85,9 @@ app.post("/create-admin", async (req, res) => {
 });
 
 // Create Agent
-app.post("/create-agent", async (req, res) => {
-  const { name, password } = req.body;
-  const userId = uuidv4();
+app.post("/agents", async (req, res) => {
+  const { name, password, userId } = req.body;
+
   const hashedPassword = await bcrypt.hash(password, 10);
 
   const newUser = new User({
@@ -98,7 +98,11 @@ app.post("/create-agent", async (req, res) => {
   });
   try {
     await newUser.save();
-    res.json({ success: true, userId });
+    res.json({
+      success: true,
+      message: "Agent created Successfully",
+      data: userId,
+    });
   } catch (error) {
     res.json({ success: false, error: error.message });
   }
@@ -106,7 +110,7 @@ app.post("/create-agent", async (req, res) => {
 
 // User Login (Returns Access Token)
 app.post("/login", async (req, res) => {
-  const { userId, password } = req.body;
+  const { agentId: userId, password } = req.body;
   const user = await User.findOne({ userId });
 
   if (user && (await bcrypt.compare(password, user.password))) {
@@ -117,16 +121,31 @@ app.post("/login", async (req, res) => {
     if (user.role === "agent") {
       agentPool.add(userId);
     }
+    const { password, ...userWithoutPassword } = user.toObject();
 
-    res.json({ success: true, token, role: user.role });
+    res.json({
+      success: true,
+      message: "Login successful",
+      data: { ...userWithoutPassword, token },
+    });
   } else {
     res.status(401).json({ success: false, message: "Invalid credentials" });
   }
 });
 
 // Check if User is Logged In
-app.get("/check-login", authenticateToken, (req, res) => {
-  res.json({ success: true, userId: req.user.userId, role: req.user.role });
+app.get("/check-login", authenticateToken, async (req, res) => {
+  const user = await User.findOne({ userId: req.user.userId });
+  if (!user) {
+    return res.status(401).json({ success: false, message: "Invalid user" });
+  } else {
+    const { password, ...userWithoutPassword } = user.toObject();
+    res.json({
+      success: true,
+      message: "User is logged in",
+      data: userWithoutPassword,
+    });
+  }
 });
 
 // Logout Route
@@ -141,12 +160,16 @@ app.post("/logout", authenticateToken, (req, res) => {
 
 // Only Admins Can Access This
 app.get("/agents", authenticateToken, async (req, res) => {
-  if (req.user.role !== "admin") {
-    return res.status(403).json({ message: "Unauthorized access" });
-  }
-
-  const agents = await User.find({ role: "agent" });
-  res.json(agents);
+  // if (req.user.role !== "admin") {
+  //   return res.status(403).json({ message: "Unauthorized access" });
+  // }
+  // filter out password please
+  const agents = await User.find({ role: "agent" }).select("-password");
+  res.json({
+    success: true,
+    message: "Agent retreived successfully",
+    data: agents,
+  });
 });
 
 /* ===================================
@@ -162,12 +185,57 @@ io.on("connection", (socket) => {
   });
 
   socket.on("new_chat_request", (data) => {
+    if (agentPool.size === 0) {
+      socket.emit("no_agents_available", {
+        message: "No agents are currently available. Please try again later.",
+      });
+      return;
+    }
+
     chatRequests.push(data);
-    io.emit("new_chat_request", data);
+    io.emit("notify_agents", {
+      message: `User ${data.userId} wants to talk with you.`,
+    });
   });
 
-  socket.on("accept_chat", (data) => {
-    chatRequests = chatRequests.filter((req) => req.userId !== data.userId);
+  socket.on("accept_chat", async ({ agentId, userId }) => {
+    if (!chatRequests.find((req) => req.userId === userId)) {
+      socket.emit("chat_already_accepted", {
+        message: "This chat request has already been accepted.",
+      });
+      return;
+    }
+
+    chatRequests = chatRequests.filter((req) => req.userId !== userId);
+    agentPool.delete(agentId);
+
+    const chatSession = new Chat({
+      userId,
+      agentId,
+      messages: [],
+    });
+    await chatSession.save();
+
+    activeChats.set(userId, agentId);
+    io.to(agentId).emit("chat_assigned", { userId });
+    io.to(userId).emit("chat_assigned", { agentId });
+  });
+
+  socket.on("send_message", async ({ userId, agentId, message, sender }) => {
+    const chat = await Chat.findOne({ userId, agentId });
+    if (chat) {
+      chat.messages.push({ sender, message });
+      await chat.save();
+      io.to(userId).emit("receive_message", { sender, message });
+      io.to(agentId).emit("receive_message", { sender, message });
+    }
+  });
+
+  socket.on("end_chat", async ({ userId, agentId }) => {
+    activeChats.delete(userId);
+    agentPool.add(agentId);
+    io.to(agentId).emit("chat_ended", { message: "Chat session ended." });
+    io.to(userId).emit("chat_ended", { message: "Chat session ended." });
   });
 
   socket.on("disconnect", () => {

@@ -20,8 +20,7 @@ app.use(bodyParser.json());
 
 const SECRET_KEY = process.env.JWT_SECRET || "your_secret_key";
 const PORT = process.env.PORT || 3000;
-const MONGO_URI =
-  process.env.MONGO_URI || "mongodb://localhost:27017/chat_system";
+const MONGO_URI = process.env.MONGO_URI;
 
 // Graceful DB Connection Handling
 mongoose
@@ -117,10 +116,6 @@ app.post("/login", async (req, res) => {
     const token = jwt.sign({ userId, role: user.role }, SECRET_KEY, {
       expiresIn: "2h",
     });
-
-    if (user.role === "agent") {
-      agentPool.add(userId);
-    }
     const { password, ...userWithoutPassword } = user.toObject();
 
     res.json({
@@ -150,6 +145,7 @@ app.get("/check-login", authenticateToken, async (req, res) => {
 
 // Logout Route
 app.post("/logout", authenticateToken, (req, res) => {
+  console.log("🔴 User logged out:", req.user.userId);
   agentPool.delete(req.user.userId);
   res.json({ success: true, message: "Logged out successfully" });
 });
@@ -180,8 +176,12 @@ io.on("connection", (socket) => {
   console.log("🔗 New client connected");
 
   socket.on("agent_join", ({ userId }) => {
+    if (!userId) {
+      return;
+    }
     agentPool.add(userId);
     console.log(`✅ Agent ${userId} joined.`);
+    console.log("Agent Pool:", agentPool);
   });
 
   socket.on("new_chat_request", (data) => {

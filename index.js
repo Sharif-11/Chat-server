@@ -62,7 +62,10 @@ const authenticateToken = (req, res, next) => {
 /* ===================================
    ✅ Routes for User Authentication 
 ====================================== */
-
+// testing api
+app.get("/", (req, res) => {
+  res.json({ message: "Welcome to Chat App API" });
+});
 // Create Admin
 app.post("/create-admin", async (req, res) => {
   const { name, password, userId } = req.body;
